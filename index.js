@@ -1,6 +1,7 @@
+// index.js - Bot musical Ana Gabriel completo con interfaz visual, barra de progreso y botones
 
 require('dotenv').config();
-const { Client, GatewayIntentBits } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ComponentType } = require('discord.js');
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus } = require('@discordjs/voice');
 const ytdl = require('@distube/ytdl-core');
 const ytSearch = require('yt-search');
@@ -42,21 +43,28 @@ client.on('messageCreate', async message => {
     const video = searchResult.videos.find(v => !v.live) || searchResult.videos[0];
     if (!video) return message.reply('❌ No encontré resultados.');
 
-    const song = { title: video.title, url: video.url };
+    const song = {
+  title: video.title,
+  url: video.url,
+  duration: video.duration?.seconds || 180 // fallback seguro
+};
 
     if (!serverQueue) {
-      const queueContruct = {
+      const queueConstruct = {
         textChannel: message.channel,
         voiceChannel: voiceChannel,
         connection: null,
         songs: [],
         player: createAudioPlayer(),
         currentSong: null,
-        previousSongs: []
+        previousSongs: [],
+        loop: false,
+        progressMessage: null,
+        progressSeconds: 0
       };
 
-      queue.set(message.guild.id, queueContruct);
-      queueContruct.songs.push(song);
+      queue.set(message.guild.id, queueConstruct);
+      queueConstruct.songs.push(song);
 
       try {
         const connection = joinVoiceChannel({
@@ -65,8 +73,8 @@ client.on('messageCreate', async message => {
           adapterCreator: message.guild.voiceAdapterCreator,
         });
 
-        queueContruct.connection = connection;
-        playSong(message.guild, queueContruct.songs[0]);
+        queueConstruct.connection = connection;
+        playSong(message.guild, queueConstruct.songs[0]);
       } catch (err) {
         console.error(err);
         queue.delete(message.guild.id);
@@ -76,50 +84,6 @@ client.on('messageCreate', async message => {
       serverQueue.songs.push(song);
       return message.channel.send(`✅ Añadido a la cola: **${song.title}**`);
     }
-  }
-
-  if (command === '!skip') {
-    if (!serverQueue) return message.reply('❌ No hay canción para saltar.');
-    serverQueue.player.stop();
-    return message.channel.send('⏭️ Canción saltada.');
-  }
-
-  if (command === '!stop') {
-    if (!serverQueue) return message.reply('❌ Nada que detener.');
-    serverQueue.songs = [];
-    serverQueue.player.stop();
-    queue.delete(message.guild.id);
-    return message.channel.send('⏹️ Reproducción detenida.');
-  }
-
-  if (command === '!pause') {
-    if (!serverQueue) return message.reply('❌ No hay música en reproducción.');
-    serverQueue.player.pause();
-    return message.channel.send('⏸️ Música pausada.');
-  }
-
-  if (command === '!resume') {
-    if (!serverQueue) return message.reply('❌ No hay música en reproducción.');
-    serverQueue.player.unpause();
-    return message.channel.send('▶️ Música reanudada.');
-  }
-
-  if (command === '!previous') {
-    if (!serverQueue || serverQueue.previousSongs.length === 0) {
-      return message.reply('❌ No hay una canción anterior.');
-    }
-
-    const prev = serverQueue.previousSongs.pop();
-    serverQueue.songs.unshift(prev);
-    serverQueue.player.stop();
-    return message.channel.send(`🔙 Reproduciendo anterior: **${prev.title}**`);
-  }
-
-  if (command === '!queue') {
-    if (!serverQueue) return message.reply('❌ La cola está vacía.');
-    const titles = serverQueue.songs.map((song, i) => `${i + 1}. ${song.title}`);
-    return message.channel.send(`📜 Cola:
-${titles.join('\n')}`);
   }
 });
 
@@ -131,24 +95,117 @@ function playSong(guild, song) {
   }
 
   serverQueue.currentSong = song;
+  serverQueue.progressSeconds = 0;
 
-  const stream = ytdl(song.url, {
-    filter: 'audioonly',
-    quality: 'highestaudio',
-    highWaterMark: 1 << 25,
-    dlChunkSize: 0
-  });
-
+  const stream = ytdl(song.url, { filter: 'audioonly', quality: 'highestaudio', highWaterMark: 1 << 25 });
   const resource = createAudioResource(stream);
   serverQueue.player.play(resource);
   serverQueue.connection.subscribe(serverQueue.player);
 
-  serverQueue.textChannel.send(`🎶 Reproduciendo: **${song.title}**`);
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('previous').setEmoji('⏮️').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('pause').setEmoji('⏸️').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('skip').setEmoji('⏭️').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('loop').setEmoji('🔁').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('shuffle').setEmoji('🔀').setStyle(ButtonStyle.Secondary)
+  );
+
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('queue').setEmoji('📜').setStyle(ButtonStyle.Secondary)
+  );
+
+  const embed = new EmbedBuilder()
+    .setColor(0x1DB954)
+    .setTitle('🎶 Reproduciendo')
+    .setDescription(`[${song.title}](${song.url})`)
+    .setFooter({ text: '⏳ Cargando barra de progreso...' });
+
+  serverQueue.textChannel.send({ embeds: [embed], components: [row1, row2] }).then(msg => {
+    serverQueue.progressMessage = msg;
+  });
+
+  const interval = setInterval(async () => {
+    if (!serverQueue || !serverQueue.progressMessage) return clearInterval(interval);
+    if (serverQueue.player.state.status !== AudioPlayerStatus.Playing) return;
+    serverQueue.progressSeconds += 10;
+
+    const progressBar = createProgressBar(serverQueue.progressSeconds, song.duration);
+
+    const updated = new EmbedBuilder()
+      .setColor(0x1DB954)
+      .setTitle('🎶 Reproduciendo')
+      .setDescription(`[${song.title}](${song.url})\n${progressBar}`);
+
+    try {
+      await serverQueue.progressMessage.edit({ embeds: [updated] });
+    } catch (e) {
+      console.warn('❌ No se pudo actualizar la barra:', e.message);
+    }
+  }, 10000);
+
+  const collector = serverQueue.textChannel.createMessageComponentCollector({ componentType: ComponentType.Button, time: 300000 });
+
+  collector.on('collect', async interaction => {
+    const safeReply = async (content) => {
+      try {
+        await interaction.deferUpdate();
+        await interaction.followUp({ content, ephemeral: true });
+      } catch (e) {}
+    };
+
+    switch (interaction.customId) {
+      case 'pause':
+        if (serverQueue.player.state.status === AudioPlayerStatus.Playing) {
+          serverQueue.player.pause();
+          await safeReply('⏸️ Música pausada');
+        } else {
+          serverQueue.player.unpause();
+          await safeReply('▶️ Música reanudada');
+        }
+        break;
+      case 'skip':
+        serverQueue.player.stop();
+        await safeReply('⏭️ Canción saltada');
+        break;
+      case 'previous':
+        const prev = serverQueue.previousSongs.pop();
+        if (prev) {
+          serverQueue.songs.unshift(prev);
+          serverQueue.player.stop();
+          await safeReply('🔙 Reproduciendo canción anterior');
+        } else {
+          await safeReply('❌ No hay canción anterior');
+        }
+        break;
+      case 'loop':
+        serverQueue.loop = !serverQueue.loop;
+        await safeReply(serverQueue.loop ? '🔁 Modo repetir ACTIVADO' : '➡️ Modo repetir DESACTIVADO');
+        break;
+      case 'shuffle':
+        if (serverQueue.songs.length > 1) {
+          const current = serverQueue.songs.shift();
+          serverQueue.songs.sort(() => Math.random() - 0.5);
+          serverQueue.songs.unshift(current);
+          await safeReply('🔀 Canciones mezcladas');
+        } else {
+          await safeReply('❌ No hay suficientes canciones para mezclar');
+        }
+        break;
+      case 'queue':
+        const list = serverQueue.songs.map((s, i) => `${i + 1}. ${s.title}`).join('\n');
+        await safeReply(`📜 Cola actual:\n${list}`);
+        break;
+    }
+  });
 
   serverQueue.player.on(AudioPlayerStatus.Idle, () => {
-    serverQueue.previousSongs.push(serverQueue.currentSong);
-    serverQueue.songs.shift();
-    playSong(guild, serverQueue.songs[0]);
+    if (serverQueue.loop) {
+      playSong(guild, serverQueue.currentSong);
+    } else {
+      serverQueue.previousSongs.push(serverQueue.currentSong);
+      serverQueue.songs.shift();
+      playSong(guild, serverQueue.songs[0]);
+    }
   });
 
   serverQueue.player.on('error', error => {
@@ -156,6 +213,38 @@ function playSong(guild, song) {
     serverQueue.songs.shift();
     playSong(guild, serverQueue.songs[0]);
   });
+}
+
+function createProgressBar(currentSeconds = 0, totalSeconds = 180) {
+  const barLength = 20;
+  if (!Number.isFinite(currentSeconds)) currentSeconds = 0;
+  if (!Number.isFinite(totalSeconds) || totalSeconds === 0) totalSeconds = 180;
+
+  const progress = Math.min(currentSeconds / totalSeconds, 1);
+  const filled = Math.max(0, Math.round(progress * barLength));
+  const empty = Math.max(0, barLength - filled);
+
+  return `\n[${'='.repeat(filled)}${' '.repeat(empty)}] ${formatTime(currentSeconds)} / ${formatTime(totalSeconds)}`;
+}
+
+function formatTime(seconds = 0) {
+  if (!Number.isFinite(seconds)) return '0:00';
+  const min = Math.floor(seconds / 60);
+  const sec = Math.floor(seconds % 60);
+  return `${min}:${sec.toString().padStart(2, '0')}`;
+}
+
+
+
+function timeToSeconds(timeStr) {
+  const parts = timeStr.split(':').map(Number);
+  return parts.length === 2 ? parts[0] * 60 + parts[1] : parts[0];
+}
+
+function formatTime(seconds) {
+  const min = Math.floor(seconds / 60);
+  const sec = seconds % 60;
+  return `${min}:${sec.toString().padStart(2, '0')}`;
 }
 
 client.login(TOKEN);
