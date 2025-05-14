@@ -6,7 +6,7 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "@discordjs/opus": "^0.10.0",
+    "opusscript": "^0.0.8",
     "@discordjs/voice": "^0.16.0",
     "@distube/ytdl-core": "^4.16.10",
     "discord.js": "^14.13.0",
